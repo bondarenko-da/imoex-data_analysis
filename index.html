@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IMOEX Pair Spread Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">MOEX Pair Analytics</p>
+          <h1>Исследование диапазонов и сезонности спредов</h1>
+          <p class="hero-copy">
+            Сайт строит пары инструментов, автоматически синхронизирует 10-минутные свечи MOEX в базу и
+            показывает динамику спредов, месячные диапазоны и процентный спред.
+          </p>
+        </div>
+        <div class="hero-card">
+          <span>Формула</span>
+          <strong>spread = close1 - close2</strong>
+          <small>Период пары автоматически ограничивается общим пересечением данных.</small>
+        </div>
+      </header>
+
+      <main>
+        <section class="panel controls-panel">
+          <form id="analysis-form" class="controls-grid">
+            <label class="field">
+              <span>Дата начала периода</span>
+              <input id="start-date" name="startDate" type="date" required />
+            </label>
+
+            <label class="field">
+              <span>Инструмент 1</span>
+              <input id="ticker1" name="ticker1" list="instrument-options" placeholder="Например, IMOEXF" value="IMOEXF" required />
+            </label>
+
+            <label class="field">
+              <span>Инструмент 2</span>
+              <input id="ticker2" name="ticker2" list="instrument-options" placeholder="Например, GLDRUBF" value="GLDRUBF" required />
+            </label>
+
+            <div class="actions">
+              <button id="analyze-button" type="submit">Построить анализ</button>
+            </div>
+          </form>
+
+          <datalist id="instrument-options"></datalist>
+
+          <div class="helper-row">
+            <p id="form-hint">Загрузка справочника инструментов...</p>
+            <p id="status-line" class="status-line"></p>
+          </div>
+        </section>
+
+        <section class="metrics-grid">
+          <article class="metric-card">
+            <span>Эффективный старт</span>
+            <strong id="metric-start">-</strong>
+          </article>
+          <article class="metric-card">
+            <span>Эффективный конец</span>
+            <strong id="metric-end">-</strong>
+          </article>
+          <article class="metric-card">
+            <span>Median spread</span>
+            <strong id="metric-median">-</strong>
+          </article>
+          <article class="metric-card">
+            <span>Наблюдений</span>
+            <strong id="metric-points">-</strong>
+          </article>
+        </section>
+
+        <section class="panel chart-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Цены пары</h2>
+              <p>Close цены обоих инструментов на одной шкале.</p>
+            </div>
+          </div>
+          <div id="price-chart" class="chart"></div>
+        </section>
+
+        <section class="panel chart-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Спред и месячные экстремумы</h2>
+              <p>Median spread, месячные минимумы и максимумы.</p>
+            </div>
+          </div>
+          <div id="spread-chart" class="chart"></div>
+        </section>
+
+        <section class="panel chart-panel">
+          <div class="panel-header">
+            <div>
+              <h2>Процентный спред</h2>
+              <p>Спред в процентах от средней цены пары.</p>
+            </div>
+          </div>
+          <div id="percent-chart" class="chart"></div>
+        </section>
+
+        <section class="tables-grid">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Месячная статистика</h2>
+                <p>Min, median, max и стандартное отклонение по каждому месяцу.</p>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Месяц</th>
+                    <th>Набл.</th>
+                    <th>Min</th>
+                    <th>Median</th>
+                    <th>Max</th>
+                    <th>Std</th>
+                  </tr>
+                </thead>
+                <tbody id="monthly-table-body">
+                  <tr>
+                    <td colspan="6" class="empty-cell">Нет данных</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <h2>Сезонность</h2>
+                <p>Heatmap медианного спреда по месяцам и годам.</p>
+              </div>
+            </div>
+            <div id="seasonality-chart" class="chart chart-compact"></div>
+          </section>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>
