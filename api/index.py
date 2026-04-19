@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import math
 import os
+import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from statistics import median
 from typing import Any
 
+import aiosqlite
 import httpx
 import psycopg
 from fastapi import FastAPI, HTTPException
@@ -75,85 +78,79 @@ app.add_middleware(
 )
 
 
-def require_database_url() -> str:
-    if not DATABASE_URL:
-        raise HTTPException(
-            status_code=500,
-            detail="DATABASE_URL is not configured. Add it in Vercel project settings or local .env.",
-        )
-    return DATABASE_URL
+def is_sqlite() -> bool:
+    url = (DATABASE_URL or "").lower()
+    return "sqlite" in url or url.endswith(".db") or (":" not in url and not url.startswith("postgresql"))
 
 
-_pool: psycopg.pool.ConnectionPool | None = None
+def get_sqlite_path() -> Path:
+    url = DATABASE_URL or ""
+    if url.lower().startswith("sqlite:"):
+        url = url[8:]
+    elif url.endswith(".db"):
+        return Path(url)
+    return Path("/tmp/imoex.db")
 
 
-def get_pool() -> psycopg.pool.ConnectionPool:
-    global _pool
-    if _pool is None:
-        _pool = psycopg.pool.ConnectionPool(
+_sqlite_conn: aiosqlite.Connection | None = None
+_pg_pool: psycopg.pool.ConnectionPool | None = None
+
+
+async def get_sqlite() -> aiosqlite.Connection:
+    global _sqlite_conn
+    if _sqlite_conn is None:
+        _sqlite_conn = await aiosqlite.connect(str(get_sqlite_path()))
+    return _sqlite_conn
+
+
+async def close_sqlite():
+    global _sqlite_conn
+    if _sqlite_conn:
+        await _sqlite_conn.close()
+        _sqlite_conn = None
+
+
+def get_pg_pool() -> psycopg.pool.ConnectionPool:
+    global _pg_pool
+    if _pg_pool is None:
+        _pg_pool = psycopg.pool.ConnectionPool(
             conninfo=require_database_url(),
             min_size=1,
             max_size=10,
             open=True,
             autocommit=True,
         )
-    return _pool
+    return _pg_pool
 
 
-def get_connection():
-    return get_pool().getconn()
+def require_database_url() -> str:
+    if not DATABASE_URL:
+        raise HTTPException(
+            status_code=500,
+            detail="DATABASE_URL is not configured. Add 'sqlite:' or 'postgresql://...' in Vercel project settings.",
+        )
+    return DATABASE_URL
 
 
-def put_connection(conn):
-    get_pool().putconn(conn)
-
-
-def ensure_schema() -> None:
+async def ensure_schema() -> None:
     global _SCHEMA_READY
     if _SCHEMA_READY:
         return
 
-    with get_connection() as conn:
+    if is_sqlite():
+        conn = await get_sqlite()
+        await conn.execute(
+            """create table if not exists instruments (instrument_id text primary key, secid text, shortname text, display_name text, assetcode text, engine text, market text, boardid text, start_date text, end_date text, expiration_date text, perpetual integer default 0, category text default 'other', updated_at text default (datetime('now')))"""
+        )
+        await conn.execute(
+            """create table if not exists candles_10m (instrument_id text not null, begin_ts text not null, end_ts text not null, open real, close real, high real, low real, volume real, value integer, primary key (instrument_id, begin_ts))"""
+        )
+        await conn.commit()
+    else:
+        conn = get_pg_pool().getconn()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                create table if not exists instruments (
-                    instrument_id text primary key,
-                    secid text not null,
-                    shortname text,
-                    display_name text,
-                    assetcode text,
-                    engine text not null,
-                    market text not null,
-                    boardid text not null,
-                    start_date date,
-                    end_date date,
-                    expiration_date date,
-                    perpetual boolean not null default false,
-                    category text not null default 'other',
-                    updated_at timestamptz not null default now()
-                )
-                """
-            )
-            cur.execute(
-                """
-                create table if not exists candles_10m (
-                    instrument_id text not null references instruments(instrument_id) on delete cascade,
-                    begin_ts timestamp not null,
-                    end_ts timestamp not null,
-                    open double precision,
-                    close double precision,
-                    high double precision,
-                    low double precision,
-                    volume double precision,
-                    value bigint,
-                    primary key (instrument_id, begin_ts)
-                )
-                """
-            )
-            cur.execute(
-                "create index if not exists idx_candles_10m_lookup on candles_10m (instrument_id, begin_ts desc)"
-            )
+            cur.execute("""create table if not exists instruments (instrument_id text primary key, secid text not null, shortname text, display_name text, assetcode text, engine text not null, market text not null, boardid text not null, start_date date, end_date date, expiration_date date, perpetual boolean default false, category text default 'other', updated_at timestamptz default now())""")
+            cur.execute("""create table if not exists candles_10m (instrument_id text not null, begin_ts timestamp not null, end_ts timestamp not null, open double precision, close double precision, high double precision, low double precision, volume double precision, value bigint, primary key (instrument_id, begin_ts))""")
 
     _SCHEMA_READY = True
 
@@ -272,60 +269,46 @@ async def resolve_instrument(secid: str) -> InstrumentRecord:
     )
 
 
-def upsert_instrument(record: InstrumentRecord) -> None:
-    ensure_schema()
-    with get_connection() as conn:
+async def upsert_instrument(record: InstrumentRecord) -> None:
+    await ensure_schema()
+    if is_sqlite():
+        conn = await get_sqlite()
+        await conn.execute(
+            """insert or replace into instruments (instrument_id, secid, shortname, display_name, assetcode, engine, market, boardid, start_date, end_date, expiration_date, perpetual, category, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            (
+                record.instrument_id,
+                record.secid,
+                record.shortname,
+                record.display_name,
+                record.assetcode,
+                record.engine,
+                record.market,
+                record.boardid,
+                str(record.start_date) if record.start_date else None,
+                str(record.end_date) if record.end_date else None,
+                str(record.expiration_date) if record.expiration_date else None,
+                1 if record.perpetual else 0,
+                record.category,
+            ),
+        )
+        await conn.commit()
+    else:
+        conn = get_pg_pool().getconn()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                insert into instruments (
-                    instrument_id, secid, shortname, display_name, assetcode, engine, market, boardid,
-                    start_date, end_date, expiration_date, perpetual, category, updated_at
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
-                on conflict (instrument_id) do update set
-                    shortname = excluded.shortname,
-                    display_name = excluded.display_name,
-                    assetcode = excluded.assetcode,
-                    start_date = excluded.start_date,
-                    end_date = excluded.end_date,
-                    expiration_date = excluded.expiration_date,
-                    perpetual = excluded.perpetual,
-                    category = excluded.category,
-                    updated_at = now()
-                """,
-                (
-                    record.instrument_id,
-                    record.secid,
-                    record.shortname,
-                    record.display_name,
-                    record.assetcode,
-                    record.engine,
-                    record.market,
-                    record.boardid,
-                    record.start_date,
-                    record.end_date,
-                    record.expiration_date,
-                    record.perpetual,
-                    record.category,
-                ),
-            )
+            cur.execute("""insert into instruments (instrument_id, secid, shortname, display_name, assetcode, engine, market, boardid, start_date, end_date, expiration_date, perpetual, category, updated_at) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now()) on conflict (instrument_id) do update set shortname=excluded.shortname, display_name=excluded.display_name, assetcode=excluded.assetcode, start_date=excluded.start_date, end_date=excluded.end_date, expiration_date=excluded.expiration_date, perpetual=excluded.perpetual, category=excluded.category, updated_at=now()""",
+                (record.instrument_id, record.secid, record.shortname, record.display_name, record.assetcode, record.engine, record.market, record.boardid, record.start_date, record.end_date, record.expiration_date, record.perpetual, record.category))
 
 
 async def sync_candles(record: InstrumentRecord, start_date: date, end_date: date) -> None:
-    ensure_schema()
-    upsert_instrument(record)
+    await ensure_schema()
+    await upsert_instrument(record)
 
     rows: list[tuple[Any, ...]] = []
     offset = 0
     while True:
         payload = await moex_get_json(
             f"/engines/{record.engine}/markets/{record.market}/boards/{record.boardid}/securities/{record.secid}/candles.json",
-            params={
-                "from": start_date.isoformat(),
-                "till": end_date.isoformat(),
-                "interval": 10,
-                "start": offset,
-            },
+            params={"from": start_date.isoformat(), "till": end_date.isoformat(), "interval": 10, "start": offset},
         )
         candle_rows = rows_to_dicts(payload, "candles")
         if not candle_rows:
@@ -333,74 +316,40 @@ async def sync_candles(record: InstrumentRecord, start_date: date, end_date: dat
 
         for row in candle_rows:
             rows.append(
-                (
-                    record.instrument_id,
-                    parse_datetime(row["begin"]),
-                    parse_datetime(row["end"]),
-                    row.get("open"),
-                    row.get("close"),
-                    row.get("high"),
-                    row.get("low"),
-                    row.get("volume"),
-                    row.get("value"),
-                )
+                (record.instrument_id, parse_datetime(row["begin"]), parse_datetime(row["end"]), row.get("open"), row.get("close"), row.get("high"), row.get("low"), row.get("volume"), row.get("value"))
             )
-
         offset += len(candle_rows)
 
     if not rows:
         return
 
-    with get_connection() as conn:
+    if is_sqlite():
+        conn = await get_sqlite()
+        for r in rows:
+            await conn.execute("""insert or replace into candles_10m (instrument_id, begin_ts, end_ts, open, close, high, low, volume, value) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", r)
+        await conn.commit()
+    else:
+        conn = get_pg_pool().getconn()
         with conn.cursor() as cur:
-            cur.executemany(
-                """
-                insert into candles_10m (
-                    instrument_id, begin_ts, end_ts, open, close, high, low, volume, value
-                ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                on conflict (instrument_id, begin_ts) do update set
-                    end_ts = excluded.end_ts,
-                    open = excluded.open,
-                    close = excluded.close,
-                    high = excluded.high,
-                    low = excluded.low,
-                    volume = excluded.volume,
-                    value = excluded.value
-                """,
-                rows,
-            )
+            cur.executemany("""insert into candles_10m (instrument_id, begin_ts, end_ts, open, close, high, low, volume, value) values (%s, %s, %s, %s, %s, %s, %s, %s, %s) on conflict (instrument_id, begin_ts) do update set end_ts=excluded.end_ts, open=excluded.open, close=excluded.close, high=excluded.high, low=excluded.low, volume=excluded.volume, value=excluded.value""", rows)
 
 
-def fetch_series(record: InstrumentRecord, start_date: date, end_date: date) -> list[dict[str, Any]]:
-    ensure_schema()
-    start_ts = datetime.combine(start_date, datetime.min.time())
-    end_ts = datetime.combine(end_date, datetime.min.time())
-    with get_connection() as conn:
+async def fetch_series(record: InstrumentRecord, start_date: date, end_date: date) -> list[dict[str, Any]]:
+    await ensure_schema()
+    if is_sqlite():
+        conn = await get_sqlite()
+        cursor = await conn.execute(
+            """select begin_ts, close, open, high, low, volume from candles_10m where instrument_id = ? and begin_ts >= ? and begin_ts < ? order by begin_ts asc""",
+            (record.instrument_id, f"{start_date}T00:00:00", f"{end_date}T23:59:59"),
+        )
+        rows = await cursor.fetchall()
+        return [{"ts": row[0], "close": float(row[1]) if row[1] else None, "open": float(row[2]) if row[2] else None, "high": float(row[3]) if row[3] else None, "low": float(row[4]) if row[4] else None, "volume": float(row[5]) if row[5] else None} for row in rows]
+    else:
+        conn = get_pg_pool().getconn()
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                select begin_ts, close, open, high, low, volume
-                from candles_10m
-                where instrument_id = %s
-                  and begin_ts >= %s
-                  and begin_ts < (%s + interval '1 day')
-                order by begin_ts asc
-                """,
-                (record.instrument_id, start_ts, end_ts),
-            )
+            cur.execute("""select begin_ts, close, open, high, low, volume from candles_10m where instrument_id = %s and begin_ts >= %s and begin_ts < (%s + interval '1 day') order by begin_ts asc""", (record.instrument_id, start_date, end_date))
             rows = cur.fetchall()
-
-    return [
-        {
-            "ts": row[0].isoformat(),
-            "close": float(row[1]) if row[1] is not None else None,
-            "open": float(row[2]) if row[2] is not None else None,
-            "high": float(row[3]) if row[3] is not None else None,
-            "low": float(row[4]) if row[4] is not None else None,
-            "volume": float(row[5]) if row[5] is not None else None,
-        }
-        for row in rows
-    ]
+        return [{"ts": row[0].isoformat(), "close": float(row[1]) if row[1] else None, "open": float(row[2]) if row[2] else None, "high": float(row[3]) if row[3] else None, "low": float(row[4]) if row[4] else None, "volume": float(row[5]) if row[5] else None} for row in rows]
 
 
 def align_spread(series1: list[dict[str, Any]], series2: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -507,13 +456,11 @@ async def build_curated_instruments() -> list[dict[str, str]]:
 
 @app.get("/health")
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    ensure_schema()
-    return {"status": "ok"}
+async def health() -> dict[str, str]:
+    await ensure_schema()
+    return {"status": "ok", "db": "sqlite" if is_sqlite() else "postgresql"}
 
 
-@app.get("/instruments")
-@app.get("/api/instruments")
 async def instruments() -> dict[str, Any]:
     items = await build_curated_instruments()
     return {"items": items}
@@ -522,7 +469,7 @@ async def instruments() -> dict[str, Any]:
 @app.post("/analyze")
 @app.post("/api/analyze")
 async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
-    ensure_schema()
+    await ensure_schema()
 
     ticker1 = normalize_ticker(request.ticker1)
     ticker2 = normalize_ticker(request.ticker2)
@@ -548,8 +495,8 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     await sync_candles(instrument1, effective_start, effective_end)
     await sync_candles(instrument2, effective_start, effective_end)
 
-    series1 = fetch_series(instrument1, effective_start, effective_end)
-    series2 = fetch_series(instrument2, effective_start, effective_end)
+    series1 = await fetch_series(instrument1, effective_start, effective_end)
+    series2 = await fetch_series(instrument2, effective_start, effective_end)
     spread_series = align_spread(series1, series2)
 
     if not spread_series:
