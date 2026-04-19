@@ -16,10 +16,14 @@
       "source": "/health",
       "destination": "/api/index.py"
     },
-    {
-      "source": "/instruments",
-      "destination": "/api/index.py"
-    }
+{
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index.py" }
+  ],
+  "functions": {
+    "api/index.py": { "runtime": "python3.11" }
+  }
+}
   ],
   "functions": {
     "api/index.py": {
