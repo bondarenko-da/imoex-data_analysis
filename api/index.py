@@ -239,7 +239,7 @@ async def build_curated_instruments() -> list[dict[str, str]]:
 @app.get("/health")
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "db": "sqlite" if is_sqlite() else "postgresql", "url": get_db_url()[:30]}
+    return {"status": "ok", "message": "IMOEX API is running"}
 
 @app.get("/instruments")
 @app.get("/api/instruments")
