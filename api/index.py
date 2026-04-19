@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import os
-import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -453,11 +452,7 @@ async def build_curated_instruments() -> list[dict[str, str]]:
 
 @app.get("/health")
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    try:
-        await ensure_schema()
-    except Exception as e:
-        return {"status": "error", "detail": str(e), "db": "unknown"}
+async def health():
     return {"status": "ok", "db": "sqlite" if is_sqlite() else "postgresql"}
 
 
