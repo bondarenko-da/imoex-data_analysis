@@ -17,12 +17,12 @@
       "destination": "/api/index.py"
     },
 {
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/api/index.py" }
+  "builds": [
+    { "src": "api/index.py", "use": "@vercel/python" }
   ],
-  "functions": {
-    "api/index.py": { "runtime": "python3.11" }
-  }
+  "routes": [
+    { "src": "/(.*)", "dest": "/api/index.py" }
+  ]
 }
   ],
   "functions": {
