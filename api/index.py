@@ -453,7 +453,11 @@ async def build_curated_instruments() -> list[dict[str, str]]:
 @app.get("/health")
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "db": "sqlite" if is_sqlite() else "postgresql"}
+    try:
+        db_type = "sqlite" if is_sqlite() else "postgresql"
+        return {"status": "ok", "db": db_type, "url": get_db_url()[:20]+"..."}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 
 async def instruments() -> dict[str, Any]:
