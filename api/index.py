@@ -84,8 +84,28 @@ def require_database_url() -> str:
     return DATABASE_URL
 
 
-def get_connection() -> psycopg.Connection:
-    return psycopg.connect(require_database_url(), autocommit=True)
+_pool: psycopg.pool.ConnectionPool | None = None
+
+
+def get_pool() -> psycopg.pool.ConnectionPool:
+    global _pool
+    if _pool is None:
+        _pool = psycopg.pool.ConnectionPool(
+            conninfo=require_database_url(),
+            min_size=1,
+            max_size=10,
+            open=True,
+            autocommit=True,
+        )
+    return _pool
+
+
+def get_connection():
+    return get_pool().getconn()
+
+
+def put_connection(conn):
+    get_pool().putconn(conn)
 
 
 def ensure_schema() -> None:
@@ -353,6 +373,8 @@ async def sync_candles(record: InstrumentRecord, start_date: date, end_date: dat
 
 def fetch_series(record: InstrumentRecord, start_date: date, end_date: date) -> list[dict[str, Any]]:
     ensure_schema()
+    start_ts = datetime.combine(start_date, datetime.min.time())
+    end_ts = datetime.combine(end_date, datetime.min.time())
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -360,11 +382,11 @@ def fetch_series(record: InstrumentRecord, start_date: date, end_date: date) -> 
                 select begin_ts, close, open, high, low, volume
                 from candles_10m
                 where instrument_id = %s
-                  and begin_ts >= %s::date
-                  and begin_ts < (%s::date + interval '1 day')
+                  and begin_ts >= %s
+                  and begin_ts < (%s + interval '1 day')
                 order by begin_ts asc
                 """,
-                (record.instrument_id, start_date, end_date),
+                (record.instrument_id, start_ts, end_ts),
             )
             rows = cur.fetchall()
 

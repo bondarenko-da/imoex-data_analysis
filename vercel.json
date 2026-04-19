@@ -1,8 +1,29 @@
 {
   "rewrites": [
     {
-      "source": "/api/:path*",
+      "source": "/api/analyze",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/api/instruments",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/api/health",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/instruments",
       "destination": "/api/index.py"
     }
-  ]
+  ],
+  "functions": {
+    "api/index.py": {
+      "runtime": "python3.11"
+    }
+  }
 }
