@@ -1,60 +1,30 @@
+import os
+import math
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import aiosqlite
+import httpx
+import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="IMOEX Pair Spread Lab", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-
-@app.get("/health")
-@app.get("/api/health")
-async def health():
-    return {"status": "ok", "message": "IMOEX API is running"}
-
-@app.get("/instruments")
-@app.get("/api/instruments")
-async def instruments():
-    return {"items": []}
-
-@app.get("/instruments")
-@app.get("/api/instruments")
-async def instruments() -> dict[str, Any]:
-    items = await build_curated_instruments()
-    return {"items": items}
-
-@app.post("/analyze")
-@app.post("/api/analyze")
-async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
-    await ensure_schema()
-    ticker1 = normalize_ticker(request.ticker1)
-    ticker2 = normalize_ticker(request.ticker2)
-    if ticker1 == ticker2:
-        raise HTTPException(status_code=400, detail="Choose two different tickers")
-    instrument1 = await resolve_instrument(ticker1)
-    instrument2 = await resolve_instrument(ticker2)
-    available_starts = [v for v in [request.start_date, instrument1.start_date, instrument2.start_date] if v]
-    effective_start = max(available_starts)
-    today = datetime.now(timezone.utc).date()
-    end_candidates = [today]
-    for instrument in (instrument1, instrument2):
-        if instrument.category == "futures" and not instrument.perpetual and instrument.expiration_date:
-            end_candidates.append(instrument.expiration_date)
-    effective_end = min(end_candidates)
-    if effective_start > effective_end:
-        raise HTTPException(status_code=400, detail="No overlapping period is available for the selected pair")
-    await sync_candles(instrument1, effective_start, effective_end)
-    await sync_candles(instrument2, effective_start, effective_end)
-    series1 = await fetch_series(instrument1, effective_start, effective_end)
-    series2 = await fetch_series(instrument2, effective_start, effective_end)
-    spread_series = align_spread(series1, series2)
-    if not spread_series:
-        raise HTTPException(status_code=404, detail="No overlapping candle points were found for the selected pair")
-    spread_values = [row["spread"] for row in spread_series]
-    monthly_stats_rows = monthly_statistics(spread_series)
-    seasonality = build_seasonality(monthly_stats_rows)
-    return {"instrument1": {"secid": instrument1.secid, "label": instrument1.display_name, "start_date": instrument1.start_date.isoformat() if instrument1.start_date else None, "expiration_date": instrument1.expiration_date.isoformat() if instrument1.expiration_date else None}, "instrument2": {"secid": instrument2.secid, "label": instrument2.display_name, "start_date": instrument2.start_date.isoformat() if instrument2.start_date else None, "expiration_date": instrument2.expiration_date.isoformat() if instrument2.expiration_date else None}, "effective_start": effective_start.isoformat(), "effective_end": effective_end.isoformat(), "summary": {"median_spread": median(spread_values), "observations": len(spread_values)}, "series": {"instrument1": series1, "instrument2": series2, "spread": spread_series}, "monthly_stats": monthly_stats_rows, "seasonality": seasonality}
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 MOEX_ISS_BASE = os.getenv("MOEX_ISS_BASE", "https://iss.moex.com/iss").rstrip("/")
 DATABASE_URL = os.getenv("DATABASE_URL")
+_SCHEMA_READY = False
+
 TOP_STOCKS = [
     ("SBER", "Сбербанк ао | SBER"),
     ("GAZP", "Газпром | GAZP"),
@@ -78,7 +48,6 @@ PERPETUAL_OVERRIDES = {
     "CNYRUBF": "Вечный фьючерс CNY/RUB | CNYRUBF",
     "RGBIF": "Вечный фьючерс RGBI | RGBIF",
 }
-_SCHEMA_READY = False
 
 
 class AnalyzeRequest(BaseModel):
@@ -102,15 +71,6 @@ class InstrumentRecord:
     expiration_date: date | None
     perpetual: bool
     category: str
-
-
-app = FastAPI(title="IMOEX Pair Spread Lab", version="1.0.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 def get_db_url() -> str:
@@ -358,7 +318,7 @@ async def sync_candles(record: InstrumentRecord, start_date: date, end_date: dat
     if is_sqlite():
         conn = await get_sqlite()
         for r in rows:
-            await conn.execute("""insert or replace into candles_10m (instrument_id, begin_ts, end_ts, open, close, high, low, volume, value) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", r)
+            await conn.execute("""insert or replace into candles_10m (instrument_id, begin_ts, end_ts, open, close, high, low, volume, value) values (?, ?, ?, ?, ?, ?, ?, ?, ?)""", r)
         await conn.commit()
     else:
         conn = get_pg_pool().getconn()
@@ -418,6 +378,16 @@ def stddev(values: list[float]) -> float | None:
     return math.sqrt(variance)
 
 
+def median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    if n % 2 == 0:
+        return (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+    return sorted_vals[n // 2]
+
+
 def monthly_statistics(spread_series: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in spread_series:
@@ -462,7 +432,7 @@ def build_seasonality(monthly_stats_rows: list[dict[str, Any]]) -> dict[str, Any
 async def build_curated_instruments() -> list[dict[str, str]]:
     futures_payload = await moex_get_json(
         "/engines/futures/markets/forts/securities.json",
-        params={"iss.only": "securities", "securities.columns": "SECID,SHORTNAME,ASSETCODE"},
+        params={"iss.only": "securities", "securities_columns": "SECID,SHORTNAME,ASSETCODE"},
     )
     futures = rows_to_dicts(futures_payload, "securities")
     items: list[dict[str, str]] = []
@@ -491,11 +461,13 @@ async def build_curated_instruments() -> list[dict[str, str]]:
 async def health():
     try:
         db_type = "sqlite" if is_sqlite() else "postgresql"
-        return {"status": "ok", "db": db_type, "url": get_db_url()[:20]+"..."}
+        return {"status": "ok", "db": db_type}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
 
+@app.get("/instruments")
+@app.get("/api/instruments")
 async def instruments() -> dict[str, Any]:
     items = await build_curated_instruments()
     return {"items": items}
