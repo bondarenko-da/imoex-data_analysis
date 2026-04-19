@@ -454,7 +454,10 @@ async def build_curated_instruments() -> list[dict[str, str]]:
 @app.get("/health")
 @app.get("/api/health")
 async def health() -> dict[str, str]:
-    await ensure_schema()
+    try:
+        await ensure_schema()
+    except Exception as e:
+        return {"status": "error", "detail": str(e), "db": "unknown"}
     return {"status": "ok", "db": "sqlite" if is_sqlite() else "postgresql"}
 
 
