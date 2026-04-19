@@ -78,17 +78,23 @@ app.add_middleware(
 )
 
 
+def get_db_url() -> str:
+    return DATABASE_URL or "sqlite:"
+
+
 def is_sqlite() -> bool:
-    url = (DATABASE_URL or "").lower()
+    url = get_db_url().lower()
     return "sqlite" in url or url.endswith(".db") or (":" not in url and not url.startswith("postgresql"))
 
 
 def get_sqlite_path() -> Path:
-    url = DATABASE_URL or ""
+    url = get_db_url()
     if url.lower().startswith("sqlite:"):
         url = url[8:]
-    elif url.endswith(".db"):
+    elif url.lower().endswith(".db"):
         return Path(url)
+    elif url == "sqlite:":
+        return Path("/tmp/imoex.db")
     return Path("/tmp/imoex.db")
 
 
@@ -114,22 +120,13 @@ def get_pg_pool() -> psycopg.pool.ConnectionPool:
     global _pg_pool
     if _pg_pool is None:
         _pg_pool = psycopg.pool.ConnectionPool(
-            conninfo=require_database_url(),
+            conninfo=get_db_url(),
             min_size=1,
             max_size=10,
             open=True,
             autocommit=True,
         )
     return _pg_pool
-
-
-def require_database_url() -> str:
-    if not DATABASE_URL:
-        raise HTTPException(
-            status_code=500,
-            detail="DATABASE_URL is not configured. Add 'sqlite:' or 'postgresql://...' in Vercel project settings.",
-        )
-    return DATABASE_URL
 
 
 async def ensure_schema() -> None:
